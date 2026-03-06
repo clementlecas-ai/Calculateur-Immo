@@ -1,0 +1,567 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  Wallet, 
+  Coins, 
+  Receipt, 
+  Landmark, 
+  TrendingUp, 
+  PlusCircle, 
+  Download, 
+  Calendar,
+  Calculator,
+  Loader2,
+  Trash2,
+  Pencil,
+  ArrowUpDown,
+  ChevronUp,
+  ChevronDown,
+  User,
+  MapPin,
+  AlertTriangle,
+  X,
+  Save
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
+
+// Initialisation de Firebase
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+export default function App() {
+  // --- ÉTATS (STATE) ---
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [commissions, setCommissions] = useState([]);
+  const [globalYearFilter, setGlobalYearFilter] = useState('2026');
+
+  // État du formulaire
+  const [editingId, setEditingId] = useState(null);
+  const [formMonth, setFormMonth] = useState('Janvier');
+  const [formYear, setFormYear] = useState('2026');
+  const [formTtc, setFormTtc] = useState('');
+  const [tvaIncluded, setTvaIncluded] = useState(true);
+  const [percentageType, setPercentageType] = useState('55'); // Par défaut à 55%
+  const [customPercentage, setCustomPercentage] = useState('');
+  const [urssafRate, setUrssafRate] = useState('22');
+  
+  // Nouveaux états : Détails de la transaction (Location/Vente retiré)
+  const [clientName, setClientName] = useState('');
+  const [propertyAddress, setPropertyAddress] = useState('');
+
+  // État Modale de suppression
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [commissionToDelete, setCommissionToDelete] = useState(null);
+
+  // État Tri du tableau
+  const [sortConfig, setSortConfig] = useState({ key: 'dateAdded', direction: 'desc' });
+
+  // --- CONSTANTES ---
+  const months = [
+    'Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 
+    'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'
+  ];
+  const monthsMap = months.reduce((acc, month, index) => ({ ...acc, [month]: index }), {});
+  const years = ['2024', '2025', '2026', '2027', '2028'];
+
+  // --- LOGIQUE FIREBASE ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Erreur d'authentification:", error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+    const commissionsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'commissions');
+    const unsubscribe = onSnapshot(commissionsRef, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setCommissions(data);
+      setLoading(false);
+    }, (error) => {
+      console.error("Erreur Firestore:", error);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- LOGIQUE MÉTIER ---
+  const resetForm = () => {
+    setFormTtc('');
+    setClientName('');
+    setPropertyAddress('');
+    setEditingId(null);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formTtc || isNaN(formTtc) || !user) return;
+
+    const baseTTC = parseFloat(formTtc);
+    const finalHT = tvaIncluded ? (baseTTC / 1.2) : baseTTC;
+    const finalTVA = baseTTC - finalHT;
+    
+    const activePercentage = percentageType === 'autre' ? parseFloat(customPercentage || 0) : parseFloat(percentageType);
+    const activeUrssafRate = parseFloat(urssafRate);
+    
+    const brutAgent = finalHT * (activePercentage / 100);
+    const urssaf = brutAgent * (activeUrssafRate / 100);
+    const netAgent = brutAgent - urssaf;
+
+    const entryData = {
+      month: formMonth,
+      year: formYear,
+      ttc: baseTTC,
+      ht: finalHT,
+      tva: finalTVA,
+      percentage: activePercentage,
+      urssafRate: activeUrssafRate, 
+      brut: brutAgent,
+      urssaf: urssaf,
+      net: netAgent,
+      clientName: clientName.trim(),
+      propertyAddress: propertyAddress.trim(),
+      dateAdded: editingId ? commissions.find(c => c.id === editingId).dateAdded : new Date().toISOString()
+    };
+
+    try {
+      if (editingId) {
+        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'commissions', editingId);
+        await updateDoc(docRef, entryData);
+      } else {
+        const newDocRef = doc(collection(db, 'artifacts', appId, 'users', user.uid, 'commissions'));
+        await setDoc(newDocRef, entryData);
+      }
+      resetForm();
+    } catch (error) {
+      console.error("Erreur lors de la sauvegarde:", error);
+    }
+  };
+
+  const handleEditClick = (c) => {
+    setEditingId(c.id);
+    setFormMonth(c.month);
+    setFormYear(c.year);
+    setFormTtc(c.ttc.toString());
+    setTvaIncluded(c.tva > 0);
+    setUrssafRate(c.urssafRate?.toString() || '22');
+    setClientName(c.clientName || '');
+    setPropertyAddress(c.propertyAddress || '');
+    
+    // Mise à jour des paliers pour l'édition (55, 65, 75)
+    if (['55', '65', '75'].includes(c.percentage.toString())) {
+      setPercentageType(c.percentage.toString());
+    } else {
+      setPercentageType('autre');
+      setCustomPercentage(c.percentage.toString());
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const openDeleteModal = (id) => {
+    setCommissionToDelete(id);
+    setDeleteModalOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!user || !commissionToDelete) return;
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'commissions', commissionToDelete);
+      await deleteDoc(docRef);
+      setDeleteModalOpen(false);
+      setCommissionToDelete(null);
+    } catch (error) {
+      console.error("Erreur lors de la suppression:", error);
+    }
+  };
+
+  // --- TRI ET FILTRAGE ---
+  const handleSort = (key) => {
+    let direction = 'desc';
+    if (sortConfig.key === key && sortConfig.direction === 'desc') {
+      direction = 'asc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const filteredAndSortedCommissions = useMemo(() => {
+    let result = globalYearFilter === 'Toutes' ? [...commissions] : commissions.filter(c => c.year === globalYearFilter);
+
+    result.sort((a, b) => {
+      let aValue = a[sortConfig.key];
+      let bValue = b[sortConfig.key];
+
+      if (sortConfig.key === 'period') {
+        aValue = parseInt(a.year) * 100 + monthsMap[a.month];
+        bValue = parseInt(b.year) * 100 + monthsMap[b.month];
+      } else if (sortConfig.key === 'details') {
+        aValue = (a.clientName || '').toLowerCase();
+        bValue = (b.clientName || '').toLowerCase();
+      }
+
+      if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    return result;
+  }, [commissions, globalYearFilter, sortConfig, monthsMap]);
+
+  // --- EXPORT ---
+  const handleExportCSV = () => {
+    if (commissions.length === 0) return;
+    const headers = ['Période', 'Client', 'Adresse', 'TTC (€)', 'HT (€)', 'TVA (€)', 'Rémunération (%)', 'Brut Agent (€)', 'URSSAF (%)', 'URSSAF (€)', 'Net Agent (€)'];
+    const rows = filteredAndSortedCommissions.map(c => [
+      `${c.month} ${c.year}`,
+      `"${c.clientName || ''}"`,
+      `"${c.propertyAddress || ''}"`,
+      c.ttc.toFixed(2),
+      c.ht.toFixed(2),
+      c.tva.toFixed(2),
+      c.percentage,
+      c.brut.toFixed(2),
+      c.urssafRate !== undefined ? c.urssafRate : 22,
+      c.urssaf.toFixed(2),
+      c.net.toFixed(2)
+    ]);
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `commissions_adn_immo_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // --- KPIs ---
+  const kpis = useMemo(() => {
+    return filteredAndSortedCommissions.reduce((acc, curr) => {
+      acc.totalTTC += curr.ttc;
+      acc.totalHT += curr.ht;
+      acc.totalTVA += curr.tva;
+      acc.totalURSSAF += curr.urssaf;
+      acc.totalNet += curr.net;
+      return acc;
+    }, { totalTTC: 0, totalHT: 0, totalTVA: 0, totalURSSAF: 0, totalNet: 0 });
+  }, [filteredAndSortedCommissions]);
+
+  const formatCurrency = (amount) => new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(amount);
+
+  // Composant d'entête de colonne triable
+  const SortHeader = ({ label, sortKey, align = 'left', color = 'text-slate-400' }) => {
+    const isActive = sortConfig.key === sortKey;
+    return (
+      <th 
+        className={`p-4 font-medium whitespace-nowrap cursor-pointer hover:bg-slate-700/50 transition-colors select-none ${align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'} ${color}`}
+        onClick={() => handleSort(sortKey)}
+      >
+        <div className={`flex items-center gap-1 ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+          {label}
+          {isActive ? (
+            sortConfig.direction === 'asc' ? <ChevronUp className="w-4 h-4 text-purple-400" /> : <ChevronDown className="w-4 h-4 text-purple-400" />
+          ) : (
+            <ArrowUpDown className="w-4 h-4 opacity-30 hover:opacity-100" />
+          )}
+        </div>
+      </th>
+    );
+  };
+
+  if (loading) return (
+    <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-slate-100">
+      <Loader2 className="w-10 h-10 animate-spin text-purple-500 mb-4" />
+      <span className="text-lg font-medium tracking-wide">Connexion à votre espace sécurisé...</span>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-900 text-slate-100 font-sans p-4 md:p-8 relative">
+      
+      {/* --- MODALE DE CONFIRMATION DE SUPPRESSION --- */}
+      {deleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl p-6 max-w-sm w-full scale-100 animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 rounded-full bg-red-500/20 flex items-center justify-center mb-4 mx-auto border border-red-500/30">
+              <AlertTriangle className="w-6 h-6 text-red-400" />
+            </div>
+            <h3 className="text-xl font-bold text-center mb-2">Supprimer la commission ?</h3>
+            <p className="text-slate-400 text-center mb-6 text-sm">
+              Cette action est irréversible. Les statistiques seront recalculées automatiquement.
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setDeleteModalOpen(false)}
+                className="flex-1 py-2.5 rounded-lg font-medium bg-slate-700 text-slate-200 hover:bg-slate-600 transition-colors"
+              >
+                Annuler
+              </button>
+              <button 
+                onClick={confirmDelete}
+                className="flex-1 py-2.5 rounded-lg font-medium bg-red-500 text-white hover:bg-red-600 shadow-[0_0_15px_rgba(239,68,68,0.3)] transition-all"
+              >
+                Supprimer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-7xl mx-auto space-y-8">
+        
+        {/* --- EN-TÊTE (Header) --- */}
+        <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-800 p-6 rounded-xl border border-slate-700/50 shadow-lg">
+          <div>
+            <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">
+              Bonjour, Clément 👋
+            </h1>
+            <p className="text-slate-400 mt-1">L'ADN Immo Dashboard - Pilotez votre activité</p>
+          </div>
+          <div className="flex items-center gap-3 bg-slate-900 py-2 px-4 rounded-lg border border-slate-700">
+            <Calendar className="w-5 h-5 text-purple-400" />
+            <select 
+              value={globalYearFilter} onChange={(e) => setGlobalYearFilter(e.target.value)}
+              className="bg-transparent border-none focus:ring-0 text-slate-200 outline-none font-medium cursor-pointer"
+            >
+              <option value="Toutes">Toutes les années</option>
+              {years.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        </header>
+
+        {/* --- KPIs --- */}
+        <section className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700/50 flex items-center gap-4 hover:border-blue-500/30 transition-colors">
+              <div className="p-3 bg-blue-500/10 rounded-lg text-blue-400"><Wallet className="w-8 h-8" /></div>
+              <div><p className="text-sm text-slate-400 font-medium">Commissions TTC</p><p className="text-2xl font-bold">{formatCurrency(kpis.totalTTC)}</p></div>
+            </div>
+            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700/50 flex items-center gap-4 hover:border-purple-500/30 transition-colors">
+              <div className="p-3 bg-purple-500/10 rounded-lg text-purple-400"><Coins className="w-8 h-8" /></div>
+              <div><p className="text-sm text-slate-400 font-medium">Commissions HT</p><p className="text-2xl font-bold">{formatCurrency(kpis.totalHT)}</p></div>
+            </div>
+            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700/50 flex items-center gap-4 hover:border-emerald-500/30 transition-colors">
+              <div className="p-3 bg-emerald-500/10 rounded-lg text-emerald-400"><Receipt className="w-8 h-8" /></div>
+              <div><p className="text-sm text-slate-400 font-medium">Total TVA</p><p className="text-2xl font-bold">{formatCurrency(kpis.totalTVA)}</p></div>
+            </div>
+            <div className="bg-slate-800 p-6 rounded-xl border border-slate-700/50 flex items-center gap-4 hover:border-orange-500/30 transition-colors">
+              <div className="p-3 bg-orange-500/10 rounded-lg text-orange-400"><Landmark className="w-8 h-8" /></div>
+              <div><p className="text-sm text-slate-400 font-medium">Total URSSAF</p><p className="text-2xl font-bold">{formatCurrency(kpis.totalURSSAF)}</p></div>
+            </div>
+          </div>
+
+          {/* GROS KPI */}
+          <div className="relative overflow-hidden bg-gradient-to-br from-purple-600 to-pink-500 p-8 rounded-xl shadow-xl border border-white/10 flex flex-col md:flex-row items-center justify-between">
+            <div className="absolute top-0 right-0 p-8 opacity-10"><TrendingUp className="w-48 h-48" /></div>
+            <div className="relative z-10 text-center md:text-left mb-4 md:mb-0">
+              <p className="text-white/80 text-lg font-medium uppercase tracking-wider mb-1">Rémunération Nette Globale</p>
+              <h2 className="text-5xl md:text-6xl font-extrabold text-white drop-shadow-md">{formatCurrency(kpis.totalNet)}</h2>
+            </div>
+            <div className="relative z-10 bg-black/20 backdrop-blur-md py-3 px-6 rounded-full border border-white/20">
+              <p className="text-white font-medium">{filteredAndSortedCommissions.length} transaction{filteredAndSortedCommissions.length > 1 ? 's' : ''}</p>
+            </div>
+          </div>
+        </section>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 items-start">
+          
+          {/* --- FORMULAIRE --- */}
+          <section className={`rounded-xl shadow-lg xl:col-span-1 overflow-hidden transition-all border ${editingId ? 'bg-indigo-900/40 border-indigo-500/50' : 'bg-slate-800 border-slate-700/50'}`}>
+            <div className="p-6 border-b border-slate-700/50 bg-slate-800/50 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {editingId ? <Pencil className="w-5 h-5 text-indigo-400" /> : <Calculator className="w-5 h-5 text-pink-400" />}
+                <h2 className="text-xl font-bold text-slate-100">{editingId ? 'Modifier la commission' : 'Nouveau Calcul'}</h2>
+              </div>
+              {editingId && (
+                <button onClick={resetForm} className="text-slate-400 hover:text-white bg-slate-700 hover:bg-slate-600 p-1.5 rounded-md transition-colors">
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+            
+            <form onSubmit={handleSubmit} className="p-6 space-y-6">
+              
+              {/* Détails optionnels */}
+              <div className="space-y-4 bg-slate-900/50 p-4 rounded-lg border border-slate-700/50">
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Détails du bien (Optionnel)</h3>
+                
+                <div className="space-y-3">
+                  <div className="relative">
+                    <User className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input type="text" placeholder="Nom du client (ex: M. Dupont)" value={clientName} onChange={(e) => setClientName(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-4 py-2 text-sm text-slate-100 focus:ring-2 focus:ring-purple-500 outline-none" />
+                  </div>
+                  <div className="relative">
+                    <MapPin className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input type="text" placeholder="Adresse du bien (ex: 12 rue de Paris)" value={propertyAddress} onChange={(e) => setPropertyAddress(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-4 py-2 text-sm text-slate-100 focus:ring-2 focus:ring-purple-500 outline-none" />
+                  </div>
+                </div>
+              </div>
+
+              {/* Période */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Mois</label>
+                  <select value={formMonth} onChange={(e) => setFormMonth(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-slate-200 focus:ring-2 focus:ring-purple-500 outline-none">
+                    {months.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">Année</label>
+                  <select value={formYear} onChange={(e) => setFormYear(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-slate-200 focus:ring-2 focus:ring-purple-500 outline-none">
+                    {years.map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* Commission TTC */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-400">Commission Globale (TTC)</label>
+                <div className="relative">
+                  <input type="number" step="0.01" required placeholder="Ex: 12000" value={formTtc} onChange={(e) => setFormTtc(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-4 pr-10 py-3 text-lg font-semibold text-slate-100 focus:ring-2 focus:ring-purple-500 outline-none" />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 font-bold">€</span>
+                </div>
+              </div>
+
+              {/* Toggle TVA */}
+              <div className="flex items-center justify-between p-4 bg-slate-900 rounded-lg border border-slate-700">
+                <div><p className="font-medium text-slate-200">TVA incluse (20%)</p></div>
+                <button type="button" onClick={() => setTvaIncluded(!tvaIncluded)} className={`w-14 h-7 rounded-full transition-colors relative flex items-center ${tvaIncluded ? 'bg-purple-500' : 'bg-slate-600'}`}>
+                  <div className={`w-5 h-5 rounded-full bg-white absolute transition-transform duration-300 ${tvaIncluded ? 'translate-x-8' : 'translate-x-1'}`}></div>
+                </button>
+              </div>
+
+              {/* Pourcentage de rémunération */}
+              <div className="space-y-3">
+                <label className="text-sm font-medium text-slate-400">Votre Part Agent (%)</label>
+                <div className="grid grid-cols-4 gap-2">
+                  {['55', '65', '75', 'autre'].map((val) => (
+                    <button key={val} type="button" onClick={() => setPercentageType(val)} className={`py-2 rounded-lg font-medium text-sm transition-all border ${percentageType === val ? 'bg-purple-500/20 text-purple-300 border-purple-500' : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'}`}>
+                      {val === 'autre' ? 'Autre' : `${val}%`}
+                    </button>
+                  ))}
+                </div>
+                {percentageType === 'autre' && (
+                  <div className="relative mt-2 animate-in fade-in">
+                    <input type="number" step="0.1" placeholder="Ex: 80" required value={customPercentage} onChange={(e) => setCustomPercentage(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-4 pr-10 py-2.5 text-slate-100 focus:ring-2 focus:ring-purple-500 outline-none" />
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 font-bold">%</span>
+                  </div>
+                )}
+              </div>
+
+              {/* URSSAF */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-400">Taux URSSAF (%)</label>
+                <div className="relative">
+                  <input type="number" step="0.1" required value={urssafRate} onChange={(e) => setUrssafRate(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-4 pr-10 py-2.5 text-slate-100 focus:ring-2 focus:ring-purple-500 outline-none" />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 font-bold">%</span>
+                </div>
+              </div>
+
+              {/* Bouton de soumission */}
+              <button type="submit" className={`w-full py-4 mt-4 rounded-xl font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 transform active:scale-[0.98] ${editingId ? 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-500/30' : 'bg-gradient-to-r from-purple-600 to-pink-500 hover:from-purple-500 hover:to-pink-400 shadow-purple-500/30'}`}>
+                {editingId ? <><Save className="w-5 h-5" /> Mettre à jour</> : <><PlusCircle className="w-5 h-5" /> Ajouter la commission</>}
+              </button>
+            </form>
+          </section>
+
+          {/* --- HISTORIQUE --- */}
+          <section className="bg-slate-800 rounded-xl border border-slate-700/50 shadow-lg xl:col-span-2 overflow-hidden flex flex-col h-full min-h-[600px]">
+            <div className="p-6 border-b border-slate-700/50 bg-slate-800/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <h2 className="text-xl font-bold text-slate-100">Historique des Opérations</h2>
+              <button onClick={handleExportCSV} disabled={filteredAndSortedCommissions.length === 0} className="flex items-center gap-2 text-sm px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 rounded-lg transition-colors border border-slate-600">
+                <Download className="w-4 h-4" /> <span>Exporter CSV</span>
+              </button>
+            </div>
+
+            <div className="p-0 overflow-x-auto flex-1">
+              {filteredAndSortedCommissions.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center p-12 text-center text-slate-500">
+                  <Receipt className="w-16 h-16 mb-4 opacity-20" />
+                  <p className="text-lg font-medium">Aucune commission enregistrée</p>
+                  <p className="text-sm mt-1">Utilisez le formulaire pour ajouter votre première vente.</p>
+                </div>
+              ) : (
+                <table className="w-full text-left border-collapse min-w-[900px]">
+                  <thead>
+                    <tr className="bg-slate-900/50 text-xs border-b border-slate-700">
+                      <SortHeader label="Période" sortKey="period" />
+                      <SortHeader label="Client & Adresse" sortKey="details" />
+                      <SortHeader label="TTC" sortKey="ttc" align="right" />
+                      <SortHeader label="HT" sortKey="ht" align="right" />
+                      <SortHeader label="% Part" sortKey="percentage" align="center" />
+                      <SortHeader label="Brut" sortKey="brut" align="right" />
+                      <SortHeader label="URSSAF" sortKey="urssaf" align="right" color="text-orange-400/80" />
+                      <SortHeader label="Net Agent" sortKey="net" align="right" color="text-pink-400" />
+                      <th className="p-4 w-20"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-700/50 text-sm">
+                    {filteredAndSortedCommissions.map((c) => (
+                      <tr key={c.id} className={`hover:bg-slate-700/20 transition-colors group ${editingId === c.id ? 'bg-indigo-900/20' : ''}`}>
+                        <td className="p-4">
+                          <div className="font-medium text-slate-200">{c.month}</div>
+                          <div className="text-xs text-slate-500">{c.year}</div>
+                        </td>
+                        <td className="p-4 max-w-[200px] truncate">
+                           <div className="flex items-center gap-1.5 mb-1">
+                             <span className="font-medium text-slate-200 truncate">{c.clientName || '-'}</span>
+                           </div>
+                           <div className="text-xs text-slate-500 flex items-center gap-1 truncate">
+                             <MapPin className="w-3 h-3 flex-shrink-0" /> {c.propertyAddress || 'Non renseigné'}
+                           </div>
+                        </td>
+                        <td className="p-4 text-right text-slate-300">{formatCurrency(c.ttc)}</td>
+                        <td className="p-4 text-right text-slate-300">{formatCurrency(c.ht)}</td>
+                        <td className="p-4 text-center">
+                          <span className="inline-flex items-center px-2 py-1 rounded-md bg-purple-500/10 text-purple-300 text-xs font-bold">{c.percentage}%</span>
+                        </td>
+                        <td className="p-4 text-right font-medium text-slate-200">{formatCurrency(c.brut)}</td>
+                        <td className="p-4 text-right text-orange-300/80">
+                          <div className="text-xs text-orange-300/50 mb-0.5">{c.urssafRate || 22}%</div>
+                          -{formatCurrency(c.urssaf)}
+                        </td>
+                        <td className="p-4 text-right font-bold text-pink-400">{formatCurrency(c.net)}</td>
+                        <td className="p-4">
+                          <div className="flex items-center justify-end gap-1 opacity-20 group-hover:opacity-100 transition-opacity">
+                            <button onClick={() => handleEditClick(c)} className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-indigo-400/10 rounded-lg transition-colors" title="Modifier">
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => openDeleteModal(c.id)} className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors" title="Supprimer">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
